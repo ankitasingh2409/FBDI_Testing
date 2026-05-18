@@ -531,6 +531,16 @@ def load_source_file_config():
     if not isinstance(column_map, dict):
         abort(f"'{CONFIG_FILE}' optional 'column_map' must be a JSON object.")
 
+    column_defaults = config.get("column_defaults", {})
+    if not isinstance(column_defaults, dict):
+        abort(f"'{CONFIG_FILE}' optional 'column_defaults' must be a JSON object.")
+    for key, defaults in column_defaults.items():
+        if not isinstance(defaults, dict):
+            abort(
+                f"'{CONFIG_FILE}' column_defaults['{key}'] must be a JSON object "
+                f"of template-column-name → constant-value."
+            )
+
     profiles = config.get("profiles", {})
     if not isinstance(profiles, dict):
         abort(f"'{CONFIG_FILE}' optional 'profiles' must be a JSON object.")
@@ -581,7 +591,13 @@ def load_source_file_config():
 
         normalized_source_column_map[source_name.strip().upper()] = mapping_by_key
 
-    return source_dir, source_file_prefixes, column_map, normalized_source_column_map
+    return (
+        source_dir,
+        source_file_prefixes,
+        column_map,
+        normalized_source_column_map,
+        column_defaults,
+    )
 
 
 def get_source_name_from_group_id(group_id):
@@ -1022,12 +1038,21 @@ def read_sources(source_files):
 # TRANSFORM
 # =============================================================================
 
-def transform(frames, column_map, template_headers, source_paths=None, group_id=None):
+def transform(
+    frames,
+    column_map,
+    template_headers,
+    source_paths=None,
+    group_id=None,
+    column_defaults=None,
+):
     """
     Apply column mapping to each source DataFrame.
     - '.' placeholder values are converted to empty/None.
     - Date columns receive Python datetime objects so Excel formats them correctly.
     - Source columns absent from the mapping (e.g. trx_id) are dropped.
+    - Any template columns listed in column_defaults are overwritten with the
+      configured constant value, regardless of the source CSV contents.
     """
     log("Transforming data to FBDI column structure ...", "HEADER")
     transformed = {}
@@ -1067,6 +1092,18 @@ def transform(frames, column_map, template_headers, source_paths=None, group_id=
                 out[fbdi_col] = df[src_col].apply(parse_to_date_value)
             else:
                 out[fbdi_col] = df[src_col].apply(clean_str).replace("", None)
+
+        defaults_for_key = (column_defaults or {}).get(key, {})
+        if defaults_for_key:
+            template_cols = template_headers.get(key, [])
+            tpl_lookup = {normalize_column_name(c): c for c in template_cols if c}
+            for tpl_col, default_value in defaults_for_key.items():
+                resolved_col = tpl_lookup.get(normalize_column_name(tpl_col), tpl_col)
+                out[resolved_col] = default_value
+                log(
+                    f"[{key}] Applied default value for '{resolved_col}' = '{default_value}'",
+                    "OK", context,
+                )
 
         transformed[key] = out
         log(f"[{key}] Transformed: {len(out)} rows, {len(out.columns)} columns", "OK")
@@ -1187,6 +1224,7 @@ def process_source_group(
     template_path,
     config_column_map,
     config_source_column_map,
+    config_column_defaults=None,
 ):
     """
     End-to-end processing for one batch group:
@@ -1232,7 +1270,14 @@ def process_source_group(
     )
     error_count += validate_trx_id_references(frames, source_paths=source_files, group_id=group_id)
 
-    transformed  = transform(frames, column_map, template_headers, source_paths=source_files, group_id=group_id)
+    transformed  = transform(
+        frames,
+        column_map,
+        template_headers,
+        source_paths=source_files,
+        group_id=group_id,
+        column_defaults=config_column_defaults,
+    )
     error_count += validate_mandatory_star_fields(transformed, template_headers, group_id=group_id)
     error_count += validate_date_columns(transformed, group_id=group_id)
 
@@ -1335,6 +1380,7 @@ def main():
         source_prefixes,
         config_column_map,
         config_source_column_map,
+        config_column_defaults,
     ) = load_source_file_config()
 
     groups = discover_source_groups(source_dir, source_prefixes)
@@ -1382,6 +1428,7 @@ def main():
                 executor.submit(
                     process_source_group,
                     gid, files, template_path, config_column_map, config_source_column_map,
+                    config_column_defaults,
                 ): gid
                 for gid, files in complete_groups.items()
             }
@@ -1409,6 +1456,7 @@ def main():
             template_path,
             config_column_map,
             config_source_column_map,
+            config_column_defaults,
         )
         return
 
@@ -1421,6 +1469,7 @@ def main():
             template_path,
             config_column_map,
             config_source_column_map,
+            config_column_defaults,
         )
         total_errors += errors
 
