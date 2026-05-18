@@ -4,6 +4,11 @@
     "trx":      "TRX",
     "trx_dist": "TRX_DIST"
   },
+  "column_defaults": {
+    "trx": {
+      "*Transaction Batch Source Name": "SY DM"
+    }
+  },
   "column_map": {
     "trx": {
       "business_unit_name":                              "*Business Unit Name",
